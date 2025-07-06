@@ -1,4 +1,3 @@
-cat > README.md << 'EOF'
 # DQN for Atari Breakout
 
 基于深度Q网络(DQN)的Atari Breakout游戏强化学习项目。
@@ -75,6 +74,3 @@ python scripts/play.py
 - 存活时长奖励: 每100步 +0.1
 - 强制发球: 防止AI选择不动策略
 - 探索率衰减: 线性衰减保持探索
-
-
-EOF
