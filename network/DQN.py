@@ -90,21 +90,109 @@ class ReplayMemory:
     def __len__(self):
         return len(self.memory)
 
+class GPUReplayMemory:
+    def __init__(self, capacity, state_shape, device, dtype=torch.float32):
+        """
+        优化的GPU经验回放缓冲池
+        capacity: 缓冲池容量
+        state_shape: 状态形状 (4, 84, 84)
+        device: GPU设备
+        dtype: 数据类型，可以用float16节省显存
+        """
+        self.capacity = capacity
+        self.device = device
+        self.position = 0
+        self.size = 0
+        
+        print(f"初始化GPU缓冲池，容量: {capacity}")
+        
+        # 使用float16可以节省一半显存
+        if dtype == torch.float16:
+            print("使用半精度浮点数 (float16) 节省显存")
+        
+        try:
+            # 预分配GPU张量
+            self.states = torch.zeros((capacity, *state_shape), dtype=dtype, device=device)
+            self.actions = torch.zeros(capacity, dtype=torch.long, device=device)
+            self.rewards = torch.zeros(capacity, dtype=torch.float32, device=device)
+            self.next_states = torch.zeros((capacity, *state_shape), dtype=dtype, device=device)
+            self.dones = torch.zeros(capacity, dtype=torch.bool, device=device)
+            
+            # 检查显存使用
+            memory_used = torch.cuda.memory_allocated(device) / (1024**3)
+            print(f"GPU缓冲池创建成功，使用显存: {memory_used:.2f} GB")
+            
+        except RuntimeError as e:
+            print(f"GPU缓冲池创建失败: {e}")
+            print("建议减小缓冲池大小或使用混合存储方案")
+            raise
+    
+    def push(self, state, action, reward, next_state, done):
+        """存储经验"""
+        # 转换并存储
+        if isinstance(state, np.ndarray):
+            state = torch.from_numpy(state.copy())
+        if isinstance(next_state, np.ndarray):
+            next_state = torch.from_numpy(next_state.copy())
+            
+        self.states[self.position] = state.to(self.device, dtype=self.states.dtype)
+        self.actions[self.position] = action
+        self.rewards[self.position] = reward
+        self.next_states[self.position] = next_state.to(self.device, dtype=self.next_states.dtype)
+        self.dones[self.position] = done
+        
+        self.position = (self.position + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
+    
+    def sample(self, batch_size):
+        """采样batch"""
+        indices = torch.randint(0, self.size, (batch_size,), device=self.device)
+        
+        # 返回时转换回float32用于计算
+        batch_states = self.states[indices].float()
+        batch_actions = self.actions[indices]
+        batch_rewards = self.rewards[indices]
+        batch_next_states = self.next_states[indices].float()
+        batch_dones = self.dones[indices]
+        
+        return batch_states, batch_actions, batch_rewards, batch_next_states, batch_dones
+    
+    def __len__(self):
+        return self.size
+
 
 # DQN Agent
 class DQNAgent:
-    def __init__(self, input_shape, num_actions):
+    def __init__(self, input_shape, num_actions, buffer_size=15000, use_gpu_buffer=True):
         self.input_shape = input_shape
         self.num_actions = num_actions
-        self.memory = ReplayMemory(3500)
+
+        # 根据显存情况选择缓冲池
+        if use_gpu_buffer and torch.cuda.is_available():
+            try:
+                # 尝试创建大容量GPU缓冲池
+                self.memory = GPUReplayMemory(
+                    capacity=buffer_size, 
+                    state_shape=input_shape, 
+                    device=device,
+                    dtype=torch.float16  # 使用半精度节省显存
+                )
+                print(f"使用GPU缓冲池，容量: {buffer_size}")
+            except RuntimeError:
+                # 如果显存不足，降级到CPU
+                print("GPU显存不足，使用CPU缓冲池")
+                self.memory = ReplayMemory(3500)
+        else:
+            self.memory = ReplayMemory(3500)
+
         self.policy_net = DQN(input_shape, num_actions).to(device)
         self.target_net = DQN(input_shape, num_actions).to(device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
-        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=0.0001)
+        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=0.00025)
         # 基于episode的线性衰减
         self.exploration_start = 1.0
         self.exploration_rate = self.exploration_start
-        self.exploration_end = 0.05
+        self.exploration_end = 0.1
         self.exploration_episodes = 1000  # 1000个episode内从1.0衰减到0.05
         self.episode_count = 0
         self.steps_done = 0
@@ -135,18 +223,25 @@ class DQNAgent:
         if len(self.memory) < batch_size:
             return None
 
-        # 从经验回放中采样
-        batch = self.memory.sample(batch_size)
-        states, actions, rewards, next_states, dones = zip(*batch)
+        # 检查缓冲池类型并相应处理
+        if isinstance(self.memory, GPUReplayMemory):
+            # GPU缓冲池返回的已经是GPU张量
+            states, actions, rewards, next_states, dones = self.memory.sample(batch_size)
+            # actions需要增加维度用于gather操作
+            actions = actions.unsqueeze(1)
+        else:
+            # CPU缓冲池需要转换
+            batch = self.memory.sample(batch_size)
+            states, actions, rewards, next_states, dones = zip(*batch)
 
-        # 转为张量，并去除多余维度
-        states = torch.tensor(np.array(states), dtype=torch.float32).to(device)  # shape: (batch_size, 1, 4, 84, 84)
-        states = states.squeeze(1)  # shape: (batch_size, 4, 84, 84)
-        actions = torch.tensor(actions, dtype=torch.int64).unsqueeze(1).to(device)  # shape: (batch_size, 1)
-        rewards = torch.tensor(rewards, dtype=torch.float32).to(device)  # shape: (batch_size,)
-        next_states = torch.tensor(np.array(next_states), dtype=torch.float32).to(device)  # shape: (batch_size, 1, 4, 84, 84)
-        next_states = next_states.squeeze(1)  # shape: (batch_size, 4, 84, 84)
-        dones = torch.tensor(dones, dtype=torch.bool).to(device)  # shape: (batch_size,)
+            # 转为张量，并去除多余维度
+            states = torch.tensor(np.array(states), dtype=torch.float32).to(device)
+            states = states.squeeze(1) if states.dim() == 5 else states
+            actions = torch.tensor(actions, dtype=torch.long).unsqueeze(1).to(device)
+            rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
+            next_states = torch.tensor(np.array(next_states), dtype=torch.float32).to(device)
+            next_states = next_states.squeeze(1) if next_states.dim() == 5 else next_states
+            dones = torch.tensor(dones, dtype=torch.bool).to(device)
 
         # 计算当前 Q 值
         q_values = self.policy_net(states).gather(1, actions).squeeze()
@@ -158,7 +253,10 @@ class DQNAgent:
         target_q_values = rewards + (0.99 * next_q_values * ~dones)
 
         # 优化
-        loss = F.mse_loss(q_values, target_q_values)
+        # loss = F.mse_loss(q_values, target_q_values)
+        # 使用Smooth L1 Loss
+        loss = F.smooth_l1_loss(q_values, target_q_values)
+
         self.optimizer.zero_grad()
         loss.backward()
         # 梯度裁剪
@@ -197,7 +295,7 @@ def train_dqn():
     
     # 初始化帧堆叠和智能体
     frame_stack = FrameStack(num_frames=4)
-    agent = DQNAgent(input_shape=(4, 84, 84), num_actions=num_actions)
+    agent = DQNAgent(input_shape=(4, 84, 84), num_actions=num_actions, buffer_size=20000, use_gpu_buffer=True)
     action_repeat = 4  # 每个动作重复4次
     
     # 训练参数
