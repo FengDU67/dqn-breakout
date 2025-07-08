@@ -192,7 +192,7 @@ class DQNAgent:
         # 基于episode的线性衰减
         self.exploration_start = 1.0
         self.exploration_rate = self.exploration_start
-        self.exploration_end = 0.1
+        self.exploration_end = 0.05
         self.exploration_episodes = 1000  # 1000个episode内从1.0衰减到0.05
         self.episode_count = 0
         self.steps_done = 0
@@ -253,9 +253,9 @@ class DQNAgent:
         target_q_values = rewards + (0.99 * next_q_values * ~dones)
 
         # 优化
-        # loss = F.mse_loss(q_values, target_q_values)
+        loss = F.mse_loss(q_values, target_q_values)
         # 使用Smooth L1 Loss
-        loss = F.smooth_l1_loss(q_values, target_q_values)
+        # loss = F.smooth_l1_loss(q_values, target_q_values)
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -295,7 +295,7 @@ def train_dqn():
     
     # 初始化帧堆叠和智能体
     frame_stack = FrameStack(num_frames=4)
-    agent = DQNAgent(input_shape=(4, 84, 84), num_actions=num_actions, buffer_size=20000, use_gpu_buffer=True)
+    agent = DQNAgent(input_shape=(4, 84, 84), num_actions=num_actions, buffer_size=25000, use_gpu_buffer=True)
     action_repeat = 4  # 每个动作重复4次
     
     # 训练参数
@@ -389,7 +389,7 @@ def train_dqn():
             agent.memory.push(state, original_action, modified_reward, next_state, done)
 
             # 训练
-            loss = agent.train()
+            loss = agent.train(batch_size=64)
             if loss is not None:
                 losses.append(loss)
             

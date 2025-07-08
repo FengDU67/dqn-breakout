@@ -11,7 +11,8 @@ from network.DQN import DQN, FrameStack
 
 if __name__ == "__main__":
     # 修正模型路径
-    model_path = "model/dqn_breakout_episode_2000.pth"
+    # model_path = "model/dqn_breakout_episode_2000.pth"
+    model_path = "dqn_breakout_episode_2000.pth"
 
     # 环境设置 - 使用和test_rgb.py相同的方式
     Env = BreakoutEnv(render=True,frameskip = 4)  # 保持和test一样的设置
